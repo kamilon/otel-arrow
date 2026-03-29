@@ -88,6 +88,8 @@ core_affinity = "0.8.3"
 criterion = "0.8.0"
 data-encoding = "2.9.0"
 datafusion = { version = "53.0.0", default-features = false }
+encoding_rs = "0.8"
+globset = "0.4"
 fluke-hpack = "0.3.1"
 flume = { version = "0.12.0", default-features = false, features = ["async"] }
 futures = "0.3.32"
@@ -239,6 +241,9 @@ contrib-processors = ["otap-df-contrib-nodes/contrib-processors"]
 condense-attributes-processor = ["otap-df-contrib-nodes/condense-attributes-processor"]
 recordset-kql-processor = ["otap-df-contrib-nodes/recordset-kql-processor"]
 resource-validator-processor = ["otap-df-contrib-nodes/resource-validator-processor"]
+# Contrib receivers (opt-in) - now in contrib-nodes
+contrib-receivers = ["otap-df-contrib-nodes/contrib-receivers"]
+file-tail-receiver = ["otap-df-contrib-nodes/file-tail-receiver"]
 
 [workspace.lints.rust]
 # General compatibility lints
