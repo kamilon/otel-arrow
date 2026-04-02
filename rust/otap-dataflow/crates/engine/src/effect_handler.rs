@@ -19,6 +19,84 @@ use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 use tokio::net::{TcpListener, UdpSocket};
 
+// ---------------------------------------------------------------------------
+// Windows shared-listener registry
+// ---------------------------------------------------------------------------
+//
+// On Unix, `SO_REUSEPORT` allows each per-core thread to create an independent
+// listening socket on the same address:port.  The kernel maintains per-socket
+// accept queues and distributes incoming connections by hashing the 4-tuple.
+//
+// Windows has no `SO_REUSEPORT`.  Instead we create a single listening socket
+// per address and hand each per-core thread a **cloned** handle obtained via
+// `socket2::Socket::try_clone()` (backed by `WSADuplicateSocketW`).  When each
+// clone is registered with a different Tokio runtime (each backed by its own
+// IOCP), accept completions are distributed across the runtimes.
+//
+// The registry is process-global because:
+// - Receiver addresses are not known until `start()` time, long after the
+//   controller has spawned per-core threads.
+// - The first thread to reach a given address creates the real socket; all
+//   others (including the first) obtain clones.
+// - Cleanup happens via `remove()` when a pipeline shuts down.
+#[cfg(windows)]
+mod shared_listener_registry {
+    use std::collections::HashMap;
+    use std::net::SocketAddr;
+    use std::sync::Mutex;
+
+    /// Process-global registry of shared listening sockets (Windows only).
+    ///
+    /// Keyed by `SocketAddr`; the value is the *original* `socket2::Socket`
+    /// that was bound and put into listen mode.  Callers obtain independent
+    /// handles via [`socket2::Socket::try_clone`].
+    static REGISTRY: Mutex<Option<HashMap<SocketAddr, socket2::Socket>>> = Mutex::new(None);
+
+    /// Returns a clone of the shared listening socket for `addr`, creating the
+    /// original on first call.
+    ///
+    /// `create` is invoked at most once per address and must return a fully
+    /// configured, listening `socket2::Socket`.
+    pub(super) fn get_or_create_tcp_listener(
+        addr: SocketAddr,
+        create: impl FnOnce() -> std::io::Result<socket2::Socket>,
+    ) -> std::io::Result<socket2::Socket> {
+        let mut guard = REGISTRY.lock().unwrap_or_else(|e| e.into_inner());
+        let map = guard.get_or_insert_with(HashMap::new);
+        if !map.contains_key(&addr) {
+            map.insert(addr, create()?);
+        }
+        map[&addr].try_clone()
+    }
+
+    /// Returns a clone of the shared UDP socket for `addr`, creating the
+    /// original on first call.
+    pub(super) fn get_or_create_udp_socket(
+        addr: SocketAddr,
+        create: impl FnOnce() -> std::io::Result<socket2::Socket>,
+    ) -> std::io::Result<socket2::Socket> {
+        // Separate map for UDP to avoid collisions with TCP on the same addr.
+        static UDP_REGISTRY: Mutex<Option<HashMap<SocketAddr, socket2::Socket>>> = Mutex::new(None);
+
+        let mut guard = UDP_REGISTRY.lock().unwrap_or_else(|e| e.into_inner());
+        let map = guard.get_or_insert_with(HashMap::new);
+        if !map.contains_key(&addr) {
+            map.insert(addr, create()?);
+        }
+        map[&addr].try_clone()
+    }
+
+    /// Removes the shared socket for `addr`, allowing it to be re-created on a
+    /// subsequent call.  This should be called during pipeline shutdown.
+    #[allow(dead_code)]
+    pub(super) fn remove(addr: &SocketAddr) {
+        let mut guard = REGISTRY.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(map) = guard.as_mut() {
+            map.remove(addr);
+        }
+    }
+}
+
 /// SourceTagging indicates whether the Context will contain empty source frames.
 #[derive(Clone, Copy)]
 pub enum SourceTagging {
@@ -149,6 +227,17 @@ impl<PData> EffectHandlerCore<PData> {
     /// pipeline engine implementation. It's important for receiver implementer to create TCP
     /// listeners via this method to ensure the scalability and the serviceability of the pipeline.
     ///
+    /// # Platform behavior
+    ///
+    /// - **Unix**: Each per-core thread creates an independent listener with
+    ///   `SO_REUSEPORT`, giving per-socket accept queues with kernel-level
+    ///   connection distribution.
+    /// - **Windows**: A single listening socket is created per address and
+    ///   shared across per-core threads via `try_clone()`
+    ///   (`WSADuplicateSocketW`).  Each clone is registered with the calling
+    ///   thread's Tokio IOCP runtime, so accept completions are distributed
+    ///   across cores.
+    ///
     /// # Errors
     ///
     /// Returns an [`Error::IoError`] if any step in the process fails.
@@ -165,7 +254,33 @@ impl<PData> EffectHandlerCore<PData> {
             error,
         };
 
-        // Create a SO_REUSEADDR + SO_REUSEPORT listener.
+        let std_listener = self.create_tcp_socket(addr).map_err(into_engine_error)?;
+        TcpListener::from_std(std_listener).map_err(into_engine_error)
+    }
+
+    /// Creates (or clones) a raw TCP listening socket for `addr`.
+    ///
+    /// On Unix this always creates a fresh socket with `SO_REUSEPORT`.
+    /// On Windows this returns a `try_clone()` of a process-wide shared socket.
+    fn create_tcp_socket(&self, addr: SocketAddr) -> std::io::Result<std::net::TcpListener> {
+        #[cfg(windows)]
+        {
+            let sock = shared_listener_registry::get_or_create_tcp_listener(addr, || {
+                Self::new_tcp_socket(addr)
+            })?;
+            Ok(sock.into())
+        }
+
+        #[cfg(not(windows))]
+        {
+            let sock = Self::new_tcp_socket(addr)?;
+            Ok(sock.into())
+        }
+    }
+
+    /// Low-level: creates a new TCP listening socket with platform-appropriate
+    /// options.
+    fn new_tcp_socket(addr: SocketAddr) -> std::io::Result<socket2::Socket> {
         let sock = socket2::Socket::new(
             match addr {
                 SocketAddr::V4(_) => socket2::Domain::IPV4,
@@ -173,32 +288,35 @@ impl<PData> EffectHandlerCore<PData> {
             },
             socket2::Type::STREAM,
             None,
-        )
-        .map_err(into_engine_error)?;
+        )?;
 
-        // Allows multiple sockets to bind to an address/port combination even if a socket in the
-        // TIME_WAIT state currently occupies that combination.
-        // Goal: Restarting the server quickly without waiting for the OS to release a port.
-        sock.set_reuse_address(true).map_err(into_engine_error)?;
-        // Explicitly allows multiple sockets to simultaneously bind and listen to the exact same
-        // IP and port. Incoming connections or packets are distributed between the sockets
-        // (load balancing).
-        // Goal: Load balancing incoming connections.
-        // TODO: Investigate adding set_reuse_port support for Windows.
+        // Allows rebinding while a previous socket is in TIME_WAIT.
+        sock.set_reuse_address(true)?;
+
+        // On Unix, SO_REUSEPORT gives each per-core listener its own accept
+        // queue with kernel-level load balancing.  On Windows this option does
+        // not exist; instead the shared-listener registry (above) distributes a
+        // single socket across cores via try_clone().
         #[cfg(unix)]
         {
-            sock.set_reuse_port(true).map_err(into_engine_error)?;
+            sock.set_reuse_port(true)?;
         }
-        sock.set_nonblocking(true).map_err(into_engine_error)?;
-        sock.bind(&addr.into()).map_err(into_engine_error)?;
-        sock.listen(8192).map_err(into_engine_error)?;
 
-        TcpListener::from_std(sock.into()).map_err(into_engine_error)
+        sock.set_nonblocking(true)?;
+        sock.bind(&addr.into())?;
+        sock.listen(8192)?;
+
+        Ok(sock)
     }
 
     /// Creates a non-blocking UDP socket on the given address with socket options defined by the
     /// pipeline engine implementation. It's important for receiver implementer to create UDP
     /// sockets via this method to ensure the scalability and the serviceability of the pipeline.
+    ///
+    /// # Platform behavior
+    ///
+    /// Same strategy as [`tcp_listener`](Self::tcp_listener): `SO_REUSEPORT` on
+    /// Unix, shared socket via `try_clone()` on Windows.
     ///
     /// # Errors
     ///
@@ -217,7 +335,32 @@ impl<PData> EffectHandlerCore<PData> {
             error,
         };
 
-        // Create a SO_REUSEADDR + SO_REUSEPORT UDP socket.
+        let std_socket = self.create_udp_socket(addr).map_err(into_engine_error)?;
+        UdpSocket::from_std(std_socket).map_err(into_engine_error)
+    }
+
+    /// Creates (or clones) a raw UDP socket for `addr`.
+    ///
+    /// On Unix this always creates a fresh socket with `SO_REUSEPORT`.
+    /// On Windows this returns a `try_clone()` of a process-wide shared socket.
+    fn create_udp_socket(&self, addr: SocketAddr) -> std::io::Result<std::net::UdpSocket> {
+        #[cfg(windows)]
+        {
+            let sock = shared_listener_registry::get_or_create_udp_socket(addr, || {
+                Self::new_udp_socket(addr)
+            })?;
+            Ok(sock.into())
+        }
+
+        #[cfg(not(windows))]
+        {
+            let sock = Self::new_udp_socket(addr)?;
+            Ok(sock.into())
+        }
+    }
+
+    /// Low-level: creates a new UDP socket with platform-appropriate options.
+    fn new_udp_socket(addr: SocketAddr) -> std::io::Result<socket2::Socket> {
         let sock = socket2::Socket::new(
             match addr {
                 SocketAddr::V4(_) => socket2::Domain::IPV4,
@@ -225,24 +368,24 @@ impl<PData> EffectHandlerCore<PData> {
             },
             socket2::Type::DGRAM,
             None,
-        )
-        .map_err(into_engine_error)?;
+        )?;
 
-        // Goal: Restarting the server quickly without waiting for the OS to release a port.
-        sock.set_reuse_address(true).map_err(into_engine_error)?;
-        // Explicitly allows multiple sockets to simultaneously bind to the exact same
-        // IP and port. Incoming packets are distributed between the sockets
-        // (load balancing).
-        // Goal: Load balancing incoming packets.
-        // TODO: Investigate adding set_reuse_port support for Windows.
+        // Allows rebinding while a previous socket is in TIME_WAIT.
+        sock.set_reuse_address(true)?;
+
+        // On Unix, SO_REUSEPORT gives each per-core socket its own receive
+        // queue with kernel-level packet distribution.  On Windows, the
+        // shared-listener registry distributes a single socket across cores
+        // via try_clone().
         #[cfg(unix)]
         {
-            sock.set_reuse_port(true).map_err(into_engine_error)?;
+            sock.set_reuse_port(true)?;
         }
-        sock.set_nonblocking(true).map_err(into_engine_error)?;
-        sock.bind(&addr.into()).map_err(into_engine_error)?;
 
-        UdpSocket::from_std(sock.into()).map_err(into_engine_error)
+        sock.set_nonblocking(true)?;
+        sock.bind(&addr.into())?;
+
+        Ok(sock)
     }
 
     /// Reports the provided metrics to the engine.
