@@ -64,7 +64,7 @@ mod shared_listener_registry {
         let mut guard = REGISTRY.lock().unwrap_or_else(|e| e.into_inner());
         let map = guard.get_or_insert_with(HashMap::new);
         if !map.contains_key(&addr) {
-            map.insert(addr, create()?);
+            let _ = map.insert(addr, create()?);
         }
         map[&addr].try_clone()
     }
@@ -81,7 +81,7 @@ mod shared_listener_registry {
         let mut guard = UDP_REGISTRY.lock().unwrap_or_else(|e| e.into_inner());
         let map = guard.get_or_insert_with(HashMap::new);
         if !map.contains_key(&addr) {
-            map.insert(addr, create()?);
+            let _ = map.insert(addr, create()?);
         }
         map[&addr].try_clone()
     }
@@ -92,7 +92,7 @@ mod shared_listener_registry {
     pub(super) fn remove(addr: &SocketAddr) {
         let mut guard = REGISTRY.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(map) = guard.as_mut() {
-            map.remove(addr);
+            let _ = map.remove(addr);
         }
     }
 }
