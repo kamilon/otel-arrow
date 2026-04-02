@@ -52,6 +52,23 @@ mod shared_listener_registry {
     /// handles via [`socket2::Socket::try_clone`].
     static REGISTRY: Mutex<Option<HashMap<SocketAddr, socket2::Socket>>> = Mutex::new(None);
 
+    // Separate map for UDP to avoid collisions with TCP on the same addr.
+    static UDP_REGISTRY: Mutex<Option<HashMap<SocketAddr, socket2::Socket>>> = Mutex::new(None);
+
+    fn get_or_create(
+        registry: &Mutex<Option<HashMap<SocketAddr, socket2::Socket>>>,
+        addr: SocketAddr,
+        create: impl FnOnce() -> std::io::Result<socket2::Socket>,
+    ) -> std::io::Result<socket2::Socket> {
+        let mut guard = registry.lock().unwrap_or_else(|e| e.into_inner());
+        let map = guard.get_or_insert_with(HashMap::new);
+        let sock = match map.entry(addr) {
+            std::collections::hash_map::Entry::Vacant(e) => e.insert(create()?),
+            std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
+        };
+        sock.try_clone()
+    }
+
     /// Returns a clone of the shared listening socket for `addr`, creating the
     /// original on first call.
     ///
@@ -61,12 +78,7 @@ mod shared_listener_registry {
         addr: SocketAddr,
         create: impl FnOnce() -> std::io::Result<socket2::Socket>,
     ) -> std::io::Result<socket2::Socket> {
-        let mut guard = REGISTRY.lock().unwrap_or_else(|e| e.into_inner());
-        let map = guard.get_or_insert_with(HashMap::new);
-        if !map.contains_key(&addr) {
-            let _ = map.insert(addr, create()?);
-        }
-        map[&addr].try_clone()
+        get_or_create(&REGISTRY, addr, create)
     }
 
     /// Returns a clone of the shared UDP socket for `addr`, creating the
@@ -75,15 +87,7 @@ mod shared_listener_registry {
         addr: SocketAddr,
         create: impl FnOnce() -> std::io::Result<socket2::Socket>,
     ) -> std::io::Result<socket2::Socket> {
-        // Separate map for UDP to avoid collisions with TCP on the same addr.
-        static UDP_REGISTRY: Mutex<Option<HashMap<SocketAddr, socket2::Socket>>> = Mutex::new(None);
-
-        let mut guard = UDP_REGISTRY.lock().unwrap_or_else(|e| e.into_inner());
-        let map = guard.get_or_insert_with(HashMap::new);
-        if !map.contains_key(&addr) {
-            let _ = map.insert(addr, create()?);
-        }
-        map[&addr].try_clone()
+        get_or_create(&UDP_REGISTRY, addr, create)
     }
 
     /// Removes the shared socket for `addr`, allowing it to be re-created on a
