@@ -8,9 +8,9 @@ use std::collections::{HashMap, HashSet};
 
 use super::COUNTER_KEY_SEPARATOR;
 use super::readings::{
-    CpuInfo, CpuTimes, DiskStats, FilesystemStats, HugepageStats, LoadAverage, MemoryStats,
-    NetworkStats, PagingStats, ProcessMetrics, ProcessStats, SwapStats, frequency_hz_i64,
-    saturating_i64,
+    CpuInfo, CpuTimes, DiskStats, FilesystemStats, HugepageStats, LoadAverage, LogicalCpuTimes,
+    MemoryStats, NetworkStats, PagingStats, ProcessMetrics, ProcessStats, SwapStats,
+    cpu_utilization, frequency_hz_i64, saturating_i64,
 };
 
 /// Result of one host metrics scrape.
@@ -33,6 +33,7 @@ pub(crate) struct HostSnapshot {
     pub(super) process_metrics: ProcessMetricsConfig,
     pub(super) cpu: Option<CpuTimes>,
     pub(super) cpu_utilization: Option<CpuTimes>,
+    pub(super) cpu_per_cpu: Vec<LogicalCpuMetrics>,
     pub(super) cpuinfo: CpuInfo,
     pub(super) load: Option<LoadAverage>,
     pub(super) memory: Option<MemoryStats>,
@@ -51,6 +52,7 @@ impl HostSnapshot {
     pub(super) fn has_metrics(&self) -> bool {
         self.cpu.is_some()
             || self.cpu_utilization.is_some()
+            || !self.cpu_per_cpu.is_empty()
             || self.cpuinfo.logical_count != 0
             || self.cpuinfo.physical_count != 0
             || !self.cpuinfo.frequencies_hz.is_empty()
@@ -90,36 +92,44 @@ pub(super) fn project_snapshot(snap: &HostSnapshot, b: &mut HostMetricsArrowBuil
     let cs = &snap.counter_starts;
 
     // -- CPU ------------------------------------------------------------------
-    if let Some(cpu) = snap.cpu {
+    if snap.cpu.is_some() || !snap.cpu_per_cpu.is_empty() {
         let m = b.begin_counter_f64(metric::CPU_TIME, "s");
-        for (mode, value) in [
-            ("user", cpu.user),
-            ("nice", cpu.nice),
-            ("system", cpu.system),
-            ("idle", cpu.idle),
-            ("iowait", cpu.wait),
-            ("interrupt", cpu.interrupt),
-            ("steal", cpu.steal),
-        ] {
-            b.append_f64_sum_dp(m, cs.get(metric::CPU_TIME, mode, start), now, value, |w| {
-                w.str(attr::CPU_MODE, mode);
-            });
+        if let Some(cpu) = snap.cpu {
+            for (mode, value) in cpu.modes() {
+                b.append_f64_sum_dp(m, cs.get(metric::CPU_TIME, mode, start), now, value, |w| {
+                    w.str(attr::CPU_MODE, mode);
+                });
+            }
+        }
+        for cpu in &snap.cpu_per_cpu {
+            for ((mode, value), &cpu_start) in cpu.times.modes().iter().zip(&cpu.starts) {
+                b.append_f64_sum_dp(m, cpu_start, now, *value, |w| {
+                    w.str(attr::CPU_MODE, mode);
+                    w.int(attr::CPU_LOGICAL_NUMBER, i64::from(cpu.logical_number));
+                });
+            }
         }
     }
-    if let Some(cpu) = snap.cpu_utilization {
+    if snap.cpu_utilization.is_some()
+        || snap.cpu_per_cpu.iter().any(|cpu| cpu.utilization.is_some())
+    {
         let m = b.begin_gauge_f64(metric::CPU_UTILIZATION, "1");
-        for (mode, value) in [
-            ("user", cpu.user),
-            ("nice", cpu.nice),
-            ("system", cpu.system),
-            ("idle", cpu.idle),
-            ("iowait", cpu.wait),
-            ("interrupt", cpu.interrupt),
-            ("steal", cpu.steal),
-        ] {
-            b.append_f64_gauge_dp(m, now, value, |w| {
-                w.str(attr::CPU_MODE, mode);
-            });
+        if let Some(cpu) = snap.cpu_utilization {
+            for (mode, value) in cpu.modes() {
+                b.append_f64_gauge_dp(m, now, value, |w| {
+                    w.str(attr::CPU_MODE, mode);
+                });
+            }
+        }
+        for cpu in &snap.cpu_per_cpu {
+            if let Some(utilization) = cpu.utilization {
+                for (mode, value) in utilization.modes() {
+                    b.append_f64_gauge_dp(m, now, value, |w| {
+                        w.str(attr::CPU_MODE, mode);
+                        w.int(attr::CPU_LOGICAL_NUMBER, i64::from(cpu.logical_number));
+                    });
+                }
+            }
         }
     }
     if snap.cpuinfo.logical_count != 0 {
@@ -781,6 +791,19 @@ pub(super) fn project_hugepages(
 #[derive(Default)]
 pub(super) struct CounterTracker {
     states: HashMap<String, CounterState>,
+    cpu_states: HashMap<u32, LogicalCpuState>,
+}
+
+struct LogicalCpuState {
+    previous: CpuTimes,
+    starts: [u64; 7],
+}
+
+pub(super) struct LogicalCpuMetrics {
+    pub(super) logical_number: u32,
+    pub(super) times: CpuTimes,
+    pub(super) utilization: Option<CpuTimes>,
+    pub(super) starts: [u64; 7],
 }
 
 pub(super) struct CounterState {
@@ -818,6 +841,62 @@ impl CounterStarts {
 }
 
 impl CounterTracker {
+    #[cfg(test)]
+    pub(super) fn cpu_ids(&self) -> impl Iterator<Item = u32> + '_ {
+        self.cpu_states.keys().copied()
+    }
+
+    pub(super) fn observe_cpus(
+        &mut self,
+        cpus: Vec<LogicalCpuTimes>,
+        default_start: u64,
+        now: u64,
+        utilization: bool,
+    ) -> Vec<LogicalCpuMetrics> {
+        let ids = cpus
+            .iter()
+            .map(|cpu| cpu.logical_number)
+            .collect::<HashSet<_>>();
+        self.cpu_states.retain(|id, _| ids.contains(id));
+        cpus.into_iter()
+            .map(|cpu| {
+                let state = self
+                    .cpu_states
+                    .entry(cpu.logical_number)
+                    .or_insert(LogicalCpuState {
+                        previous: cpu.times,
+                        starts: [default_start; 7],
+                    });
+                let cpu_utilization =
+                    if utilization && state.starts.iter().all(|&start| start >= default_start) {
+                        cpu_utilization(state.previous, cpu.times)
+                    } else {
+                        None
+                    };
+                for (((_, previous), (_, current)), start) in state
+                    .previous
+                    .modes()
+                    .into_iter()
+                    .zip(cpu.times.modes())
+                    .zip(&mut state.starts)
+                {
+                    if *start < default_start {
+                        *start = default_start;
+                    } else if current < previous {
+                        *start = now;
+                    }
+                }
+                state.previous = cpu.times;
+                LogicalCpuMetrics {
+                    logical_number: cpu.logical_number,
+                    times: cpu.times,
+                    utilization: cpu_utilization,
+                    starts: state.starts,
+                }
+            })
+            .collect()
+    }
+
     pub(super) fn snapshot(
         &mut self,
         default_start: u64,
@@ -835,15 +914,7 @@ impl CounterTracker {
                 metric::CPU_TIME,
                 default_start,
                 now,
-                &[
-                    ("user", cpu.user),
-                    ("nice", cpu.nice),
-                    ("system", cpu.system),
-                    ("idle", cpu.idle),
-                    ("iowait", cpu.wait),
-                    ("interrupt", cpu.interrupt),
-                    ("steal", cpu.steal),
-                ],
+                &cpu.modes(),
                 &mut starts,
             );
         }

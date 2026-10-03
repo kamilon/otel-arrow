@@ -23,6 +23,25 @@ pub(super) struct CpuTimes {
     pub(super) steal: f64,
 }
 
+impl CpuTimes {
+    pub(super) fn modes(self) -> [(&'static str, f64); 7] {
+        [
+            ("user", self.user),
+            ("nice", self.nice),
+            ("system", self.system),
+            ("idle", self.idle),
+            ("iowait", self.wait),
+            ("interrupt", self.interrupt),
+            ("steal", self.steal),
+        ]
+    }
+}
+
+pub(super) struct LogicalCpuTimes {
+    pub(super) logical_number: u32,
+    pub(super) times: CpuTimes,
+}
+
 #[derive(Clone, Default)]
 pub(super) struct CpuInfo {
     pub(super) logical_count: u64,
@@ -37,10 +56,11 @@ pub(super) struct LoadAverage {
     pub(super) fifteen_minutes: f64,
 }
 
-#[derive(Copy, Clone, Default)]
+#[derive(Default)]
 pub(super) struct StatSnapshot {
     pub(super) boot_time_unix_nano: u64,
     pub(super) cpu: Option<CpuTimes>,
+    pub(super) cpu_per_cpu: Option<io::Result<Vec<LogicalCpuTimes>>>,
     pub(super) processes: ProcessStats,
 }
 
@@ -260,7 +280,7 @@ pub(super) struct NetworkStats {
     pub(super) tx_dropped: u64,
 }
 
-pub(super) fn parse_stat(input: &str, clk_tck: f64) -> StatSnapshot {
+pub(super) fn parse_stat(input: &str, clk_tck: f64, per_cpu: bool) -> StatSnapshot {
     let mut snapshot = StatSnapshot::default();
     for line in input.lines() {
         if let Some(rest) = line.strip_prefix("cpu ") {
@@ -275,7 +295,61 @@ pub(super) fn parse_stat(input: &str, clk_tck: f64) -> StatSnapshot {
             snapshot.processes.created = parse_u64(value);
         }
     }
+    snapshot.cpu_per_cpu = per_cpu.then(|| parse_logical_cpu_times(input, clk_tck));
     snapshot
+}
+
+fn parse_logical_cpu_times(input: &str, clk_tck: f64) -> io::Result<Vec<LogicalCpuTimes>> {
+    let mut cpus = Vec::new();
+    let mut ids = HashSet::new();
+    for line in input.lines() {
+        let mut tokens = line.split_whitespace();
+        let Some(name) = tokens.next() else {
+            continue;
+        };
+        let Some(id) = name.strip_prefix("cpu").filter(|id| !id.is_empty()) else {
+            continue;
+        };
+        let logical_number = id
+            .bytes()
+            .all(|byte| byte.is_ascii_digit())
+            .then(|| id.parse::<u32>().ok())
+            .flatten()
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("invalid CPU ID: {name}"),
+                )
+            })?;
+        if !ids.insert(logical_number) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("duplicate CPU ID: {name}"),
+            ));
+        }
+        let mut fields = [0_u64; 10];
+        let mut count = 0;
+        for (idx, token) in tokens.take(fields.len()).enumerate() {
+            fields[idx] = token.parse().map_err(|err| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("invalid {name} counter: {err}"),
+                )
+            })?;
+            count += 1;
+        }
+        if count < 4 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("missing {name} counters"),
+            ));
+        }
+        cpus.push(LogicalCpuTimes {
+            logical_number,
+            times: cpu_times_from_ticks(fields, clk_tck),
+        });
+    }
+    Ok(cpus)
 }
 
 pub(super) fn parse_cpu_total(input: &str, clk_tck: f64) -> Option<CpuTimes> {
@@ -289,9 +363,13 @@ pub(super) fn parse_cpu_total(input: &str, clk_tck: f64) -> Option<CpuTimes> {
         return None;
     }
 
+    Some(cpu_times_from_ticks(fields, clk_tck))
+}
+
+fn cpu_times_from_ticks(fields: [u64; 10], clk_tck: f64) -> CpuTimes {
     let user = fields[0].saturating_sub(fields[8]);
     let nice = fields[1].saturating_sub(fields[9]);
-    Some(CpuTimes {
+    CpuTimes {
         user: ticks_to_seconds(user, clk_tck),
         nice: ticks_to_seconds(nice, clk_tck),
         system: ticks_to_seconds(fields[2], clk_tck),
@@ -299,7 +377,7 @@ pub(super) fn parse_cpu_total(input: &str, clk_tck: f64) -> Option<CpuTimes> {
         wait: ticks_to_seconds(fields[4], clk_tck),
         interrupt: ticks_to_seconds(fields[5].saturating_add(fields[6]), clk_tck),
         steal: ticks_to_seconds(fields[7], clk_tck),
-    })
+    }
 }
 
 pub(super) fn cpu_utilization(previous: CpuTimes, current: CpuTimes) -> Option<CpuTimes> {

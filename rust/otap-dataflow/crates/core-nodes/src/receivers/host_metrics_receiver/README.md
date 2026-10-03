@@ -47,6 +47,7 @@ config:
     cpu:
       enabled: true
       interval: 10s
+      per_cpu: false
       utilization: false
     memory:
       limit: false
@@ -80,6 +81,7 @@ type: receiver:host_metrics
 config:
   families:
     cpu:
+      per_cpu: true
       utilization: true
     memory:
       limit: true
@@ -96,6 +98,41 @@ Families are `cpu`, `memory`, `paging`, `system`, `disk`, `filesystem`,
 Host-wide collection must run in a one-core source pipeline. Configure that at
 the surrounding pipeline `policies.resources.core_allocation` level. Use a
 topic exporter to fan out to multicore downstream processing when needed.
+
+### Per-logical-CPU metrics
+
+`families.cpu.per_cpu: true` adds per-logical-CPU `system.cpu.time` series
+alongside the existing aggregate series. It defaults to `false` and does not
+enable utilization by itself. `families.cpu.utilization: true` adds aggregate
+`system.cpu.utilization`; with both options enabled, it also adds per-logical-CPU
+utilization.
+
+CPU time remains a monotonic cumulative sum in seconds. Utilization remains a
+gauge with unit `1`, calculated from CPU time deltas; each logical CPU's modes
+are divided by that CPU's total delta, not by the host CPU count.
+
+Per-CPU datapoints have an integer `cpu.logical_number` attribute alongside
+`cpu.mode`. Aggregate datapoints have `cpu.mode` but no `cpu.logical_number`.
+Logical numbers are the actual Linux `cpuN` IDs and may be sparse; they are not
+positions in a contiguous list. Linux logical CPUs include separate hardware
+threads, not just physical cores.
+
+**Do not sum aggregate and per-CPU CPU time together: this double counts CPU
+time.** Select aggregate or per-CPU series by the absence or presence of
+`cpu.logical_number`.
+
+The first successful CPU observation supplies a baseline, so utilization is
+emitted only after a valid pair of scrapes with increasing total counters and
+no counter decrease. Newly observed CPUs warm up independently. An observed
+CPU disappearance followed by reappearance requires a fresh baseline; resets
+and unchanged counters also omit utilization until a valid pair is available.
+
+Per-CPU time adds seven datapoints per observed CPU per CPU scrape, one for
+each mode. Per-CPU utilization adds up to seven more datapoints per CPU after
+warmup. CPU count and frequency metrics retain their existing behavior.
+The CPU family's `enabled` and `interval` settings still govern collection,
+and the source pipeline must still use one core regardless of the number of
+observed logical CPUs.
 
 ## Filters
 
@@ -164,7 +201,6 @@ runtime metric sets may also be attached by the pipeline telemetry policy.
   `system.cpu.load_average.1m`, `system.cpu.load_average.5m`, and
   `system.cpu.load_average.15m` with unit `{thread}`. Semantic Conventions
   1.41.0 does not register these names.
-- `families.cpu.per_cpu` is rejected in v1.
 - `families.network.include_connection_count` is rejected in v1.
 - Process metrics are aggregate host summaries by default. Linux per-process
   metrics are available only with `processes.mode: summary_and_per_process`.

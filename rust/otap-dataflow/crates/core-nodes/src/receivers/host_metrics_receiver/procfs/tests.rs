@@ -7,7 +7,6 @@ use crate::receivers::host_metrics_receiver::{ProcessLabelsConfig, ProcessMetric
 #[cfg(feature = "dev-tools")]
 use otel_arrow_dfe_pdata::proto::opentelemetry::common::v1::AnyValue;
 use otel_arrow_dfe_pdata::proto::opentelemetry::common::v1::{KeyValue, any_value};
-#[cfg(feature = "dev-tools")]
 use otel_arrow_dfe_pdata::proto::opentelemetry::metrics::v1::NumberDataPoint;
 use otel_arrow_dfe_pdata::proto::opentelemetry::metrics::v1::{
     AggregationTemporality, Metric, MetricsData, metric as otlp_metric, number_data_point,
@@ -52,6 +51,7 @@ fn memory_only_procfs_config() -> ProcfsConfig {
         load: false,
         per_processes: false,
         cpu_utilization: false,
+        cpu_per_cpu: false,
         memory_limit: false,
         memory_shared: false,
         memory_hugepages: false,
@@ -648,6 +648,7 @@ fn scrape_due_emits_successful_families_after_partial_read_error() {
             load: false,
             per_processes: false,
             cpu_utilization: false,
+            cpu_per_cpu: false,
             memory_limit: false,
             memory_shared: false,
             memory_hugepages: false,
@@ -719,6 +720,7 @@ fn scrape_due_collects_opt_in_per_process_metrics_with_filters_and_limit() {
             processes: true,
             per_processes: true,
             cpu_utilization: false,
+            cpu_per_cpu: false,
             memory_limit: false,
             memory_shared: false,
             memory_hugepages: false,
@@ -841,6 +843,7 @@ fn scrape_due_ignores_expected_per_process_races_and_permission_shapes() {
             processes: true,
             per_processes: true,
             cpu_utilization: false,
+            cpu_per_cpu: false,
             memory_limit: false,
             memory_shared: false,
             memory_hugepages: false,
@@ -907,6 +910,7 @@ fn scrape_due_skips_process_io_when_disk_io_metric_is_disabled() {
             processes: true,
             per_processes: true,
             cpu_utilization: false,
+            cpu_per_cpu: false,
             memory_limit: false,
             memory_shared: false,
             memory_hugepages: false,
@@ -982,6 +986,7 @@ fn scrape_due_preserves_disk_counter_state_after_diskstats_read_error() {
             load: false,
             per_processes: false,
             cpu_utilization: false,
+            cpu_per_cpu: false,
             memory_limit: false,
             memory_shared: false,
             memory_hugepages: false,
@@ -1083,6 +1088,7 @@ fn scrape_due_uses_stable_fallback_start_time_when_stat_is_unavailable() {
             load: false,
             per_processes: false,
             cpu_utilization: false,
+            cpu_per_cpu: false,
             memory_limit: false,
             memory_shared: false,
             memory_hugepages: false,
@@ -1161,6 +1167,7 @@ fn validation_requires_stat_for_cumulative_families() {
             load: false,
             per_processes: false,
             cpu_utilization: false,
+            cpu_per_cpu: false,
             memory_limit: false,
             memory_shared: false,
             memory_hugepages: false,
@@ -1218,6 +1225,7 @@ fn scrape_worker_preserves_startup_validation_errors() {
             load: false,
             per_processes: false,
             cpu_utilization: false,
+            cpu_per_cpu: false,
             memory_limit: false,
             memory_shared: false,
             memory_hugepages: false,
@@ -1379,6 +1387,7 @@ fn scrape_due_fails_when_all_due_families_fail() {
             load: false,
             per_processes: false,
             cpu_utilization: false,
+            cpu_per_cpu: false,
             memory_limit: false,
             memory_shared: false,
             memory_hugepages: false,
@@ -1445,6 +1454,7 @@ fn scrape_due_reads_opt_in_disk_limit_from_sysfs() {
             load: false,
             per_processes: false,
             cpu_utilization: false,
+            cpu_per_cpu: false,
             memory_limit: false,
             memory_shared: false,
             memory_hugepages: false,
@@ -1528,6 +1538,7 @@ fn scrape_due_uses_boot_time_for_counter_only_family_ticks() {
             load: false,
             per_processes: false,
             cpu_utilization: false,
+            cpu_per_cpu: false,
             memory_limit: false,
             memory_shared: false,
             memory_hugepages: false,
@@ -1616,6 +1627,7 @@ fn scrape_due_reads_filesystem_usage_from_mountinfo() {
             load: false,
             per_processes: false,
             cpu_utilization: false,
+            cpu_per_cpu: false,
             memory_limit: false,
             memory_shared: false,
             memory_hugepages: false,
@@ -1657,6 +1669,499 @@ fn scrape_due_reads_filesystem_usage_from_mountinfo() {
     assert_eq!(scrape.snapshot.filesystems[0].mountpoint, "/");
     assert_eq!(scrape.snapshot.filesystems[0].fs_type, "ext4");
     assert!(scrape.snapshot.filesystems[0].limit_bytes.is_some());
+}
+
+fn cpu_fixture(per_cpu: bool, utilization: bool) -> (tempfile::TempDir, ProcfsSource) {
+    let root = tempfile::tempdir().expect("tempdir");
+    let proc = root.path().join("proc");
+    fs::create_dir(&proc).expect("proc dir");
+    fs::write(proc.join("cpuinfo"), "processor: 0\nprocessor: 12\n").expect("cpuinfo");
+    fs::write(
+        proc.join("stat"),
+        "cpu 100 0 50 200\ncpu0 40 0 20 80\ncpu12 60 0 30 120\nbtime 1700000000\n",
+    )
+    .expect("stat");
+    let source = ProcfsSource::new(
+        Some(root.path()),
+        ProcfsConfig {
+            cpu: true,
+            memory: false,
+            cpu_per_cpu: per_cpu,
+            cpu_utilization: utilization,
+            ..memory_only_procfs_config()
+        },
+    )
+    .expect("CPU source");
+    (root, source)
+}
+
+fn cpu_due() -> ProcfsFamilies {
+    ProcfsFamilies {
+        cpu: true,
+        ..ProcfsFamilies::default()
+    }
+}
+
+fn cpu_points<'a>(data: &'a MetricsData, name: &str) -> &'a [NumberDataPoint] {
+    let metrics = &data.resource_metrics[0].scope_metrics[0].metrics;
+    let matching = metrics
+        .iter()
+        .filter(|metric| metric.name == name)
+        .collect::<Vec<_>>();
+    assert_eq!(matching.len(), 1, "one metric record for {name}");
+    match matching[0].data.as_ref().expect("CPU metric data") {
+        otlp_metric::Data::Sum(sum) => &sum.data_points,
+        otlp_metric::Data::Gauge(gauge) => &gauge.data_points,
+        _ => panic!("unexpected CPU metric type"),
+    }
+}
+
+fn cpu_point_value(data: &MetricsData, name: &str, logical: Option<i64>, mode: &str) -> f64 {
+    let point = cpu_points(data, name)
+        .iter()
+        .find(|point| {
+            let id = point
+                .attributes
+                .iter()
+                .find(|attr| attr.key == attr::CPU_LOGICAL_NUMBER);
+            let matching_id = match (logical, id) {
+                (None, None) => true,
+                (Some(logical), Some(id)) => matches!(
+                    id.value.as_ref().and_then(|value| value.value.as_ref()),
+                    Some(any_value::Value::IntValue(value)) if *value == logical
+                ),
+                _ => false,
+            };
+            matching_id
+                && point.attributes.iter().any(|attr| {
+                    attr.key == attr::CPU_MODE
+                        && matches!(
+                            attr.value.as_ref().and_then(|value| value.value.as_ref()),
+                            Some(any_value::Value::StringValue(value)) if value == mode
+                        )
+                })
+        })
+        .expect("CPU point");
+    match point.value {
+        Some(number_data_point::Value::AsDouble(value)) => value,
+        _ => panic!("CPU point must have a double value"),
+    }
+}
+
+/// Scenario: proc/stat includes reordered, sparse, multi-digit and large logical CPU IDs.
+/// Guarantees: actual numeric IDs are retained without dense allocation or changes to aggregate data.
+#[test]
+fn stat_parser_preserves_logical_cpu_ids() {
+    let stat = parse_stat(
+        "cpu 100 50 30 40 5 2 3 7 10 4\n\
+         cpu12 100 50 30 40 5 2 3 7 10 4\n\
+         cpu0 10 20 30 40\n\
+         cpu4294967295 1 2 3 4\n\
+         btime 123\nprocs_running 2\nprocesses 3\n",
+        10.0,
+        true,
+    );
+    assert_eq!(stat.cpu.expect("aggregate").user, 9.0);
+    assert_eq!(stat.boot_time_unix_nano, 123 * NANOS_PER_SEC);
+    assert_eq!(stat.processes.running, 2);
+    assert_eq!(stat.processes.created, 3);
+    let cpus = stat.cpu_per_cpu.expect("selected").expect("valid CPU rows");
+    assert_eq!(
+        cpus.iter()
+            .map(|cpu| cpu.logical_number)
+            .collect::<Vec<_>>(),
+        vec![12, 0, u32::MAX]
+    );
+    assert_eq!(cpus[0].times.user, 9.0);
+    assert_eq!(cpus[0].times.nice, 4.6);
+    assert_eq!(cpus[0].times.interrupt, 0.5);
+    assert_eq!(cpus[1].times.idle, 4.0);
+    assert_eq!(cpus[1].times.steal, 0.0);
+}
+
+/// Scenario: per-CPU collection is disabled and proc/stat contains malformed cpuN data.
+/// Guarantees: unselected rows are ignored and existing aggregate and boot-time parsing is preserved.
+#[test]
+fn stat_parser_ignores_unselected_logical_cpus() {
+    let stat = parse_stat("cpu 10 20 30 40\ncpuBAD invalid\nbtime 123\n", 10.0, false);
+    assert_eq!(stat.cpu.expect("aggregate").user, 1.0);
+    assert_eq!(stat.boot_time_unix_nano, 123 * NANOS_PER_SEC);
+    assert!(stat.cpu_per_cpu.is_none());
+}
+
+/// Scenario: selected CPU rows have invalid IDs, duplicate IDs, missing fields or invalid counters.
+/// Guarantees: the entire per-CPU observation fails explicitly without inventing zero counters.
+#[test]
+fn stat_parser_rejects_malformed_logical_cpus() {
+    for row in [
+        "cpuBAD 1 2 3 4",
+        "cpu+1 1 2 3 4",
+        "cpu4294967296 1 2 3 4",
+        "cpu0 1 2 3",
+        "cpu0 1 bad 3 4",
+        "cpu0 1 -2 3 4",
+        "cpu0 1 2 3 18446744073709551616",
+        "cpu0 1 2 3 4\ncpu00 5 6 7 8",
+    ] {
+        let stat = parse_stat(&format!("cpu 10 20 30 40\n{row}\nbtime 123\n"), 10.0, true);
+        assert_eq!(stat.cpu.expect("aggregate").user, 1.0);
+        assert_eq!(stat.boot_time_unix_nano, 123 * NANOS_PER_SEC);
+        assert_eq!(
+            stat.cpu_per_cpu
+                .expect("selected")
+                .err()
+                .expect("invalid CPU row")
+                .kind(),
+            ErrorKind::InvalidData,
+            "{row}"
+        );
+    }
+}
+
+/// Scenario: per-CPU time is enabled without utilization.
+/// Guarantees: cumulative time is emitted on the first scrape with integer IDs alongside aggregate time.
+#[test]
+fn scrape_cpu_time_adds_labeled_points_without_utilization() {
+    let (_root, mut source) = cpu_fixture(true, false);
+    let scrape = scrape_blocking(&mut source, cpu_due()).expect("CPU scrape");
+    assert_eq!(scrape.partial_errors, 0);
+    assert_eq!(scrape.snapshot.cpu_per_cpu.len(), 2);
+    assert!(scrape.snapshot.cpu_utilization.is_none());
+    assert!(
+        scrape
+            .snapshot
+            .cpu_per_cpu
+            .iter()
+            .all(|cpu| cpu.utilization.is_none())
+    );
+    let now = scrape.snapshot.now_unix_nano;
+    let start = scrape.snapshot.start_time_unix_nano;
+    let data = decode_metrics(scrape.snapshot.into_otap_records().expect("encode"));
+    let metrics = &data.resource_metrics[0].scope_metrics[0].metrics;
+    let time = metric_by_name(metrics, metric::CPU_TIME);
+    assert_eq!(time.unit, "s");
+    let Some(otlp_metric::Data::Sum(sum)) = &time.data else {
+        panic!("CPU time should be a sum");
+    };
+    assert!(sum.is_monotonic);
+    assert_eq!(
+        sum.aggregation_temporality,
+        AggregationTemporality::Cumulative as i32
+    );
+    assert_no_first_point_attr(metrics, metric::CPU_TIME, attr::CPU_LOGICAL_NUMBER);
+    let points = cpu_points(&data, metric::CPU_TIME);
+    assert_eq!(points.len(), 21);
+    assert!(points.iter().all(|point| point.time_unix_nano == now
+        && point.start_time_unix_nano == start
+        && matches!(point.value, Some(number_data_point::Value::AsDouble(_)))));
+    for id in [0, 12] {
+        let labeled = points
+            .iter()
+            .filter(|point| {
+                point.attributes.iter().any(|attr| {
+                    attr.key == attr::CPU_LOGICAL_NUMBER
+                        && matches!(
+                            attr.value.as_ref().and_then(|value| value.value.as_ref()),
+                            Some(any_value::Value::IntValue(value)) if *value == id
+                        )
+                })
+            })
+            .count();
+        assert_eq!(labeled, 7);
+    }
+    assert_eq!(
+        cpu_point_value(&data, metric::CPU_TIME, None, "user"),
+        100.0 / source.clk_tck
+    );
+    assert_eq!(
+        cpu_point_value(&data, metric::CPU_TIME, Some(12), "user"),
+        60.0 / source.clk_tck
+    );
+    assert!(
+        !metrics
+            .iter()
+            .any(|metric| metric.name == metric::CPU_UTILIZATION)
+    );
+}
+
+/// Scenario: two CPU scrapes include different per-CPU deltas and reordered rows.
+/// Guarantees: utilization warms up once and normalizes by each CPU's own total, preserving aggregate output.
+#[test]
+fn scrape_cpu_utilization_is_independent_per_logical_cpu() {
+    let (root, mut source) = cpu_fixture(true, true);
+    let first = scrape_blocking(&mut source, cpu_due()).expect("first CPU scrape");
+    assert!(first.snapshot.cpu_utilization.is_none());
+    assert!(
+        first
+            .snapshot
+            .cpu_per_cpu
+            .iter()
+            .all(|cpu| cpu.utilization.is_none())
+    );
+    fs::write(
+        root.path().join("proc/stat"),
+        "cpu 180 0 80 250\ncpu12 80 0 40 150\ncpu0 100 0 40 100\nbtime 1700000000\n",
+    )
+    .expect("second stat");
+    let second = scrape_blocking(&mut source, cpu_due()).expect("second CPU scrape");
+    let now = second.snapshot.now_unix_nano;
+    let data = decode_metrics(second.snapshot.into_otap_records().expect("encode"));
+    let metrics = &data.resource_metrics[0].scope_metrics[0].metrics;
+    assert_metric_shape(metrics, metric::CPU_UTILIZATION, "1", None);
+    assert_no_first_point_attr(metrics, metric::CPU_UTILIZATION, attr::CPU_LOGICAL_NUMBER);
+    let points = cpu_points(&data, metric::CPU_UTILIZATION);
+    assert_eq!(points.len(), 21);
+    assert!(
+        points
+            .iter()
+            .all(|point| point.time_unix_nano == now && point.start_time_unix_nano == 0)
+    );
+    for (id, expected) in [(None, 0.5), (Some(0), 0.6), (Some(12), 1.0 / 3.0)] {
+        let actual = cpu_point_value(&data, metric::CPU_UTILIZATION, id, "user");
+        assert!((actual - expected).abs() < 1e-10);
+    }
+}
+
+/// Scenario: per-CPU collection is disabled while aggregate utilization is enabled.
+/// Guarantees: the opt-in does not alter default CPU series count or introduce logical CPU attributes.
+#[test]
+fn scrape_cpu_default_preserves_aggregate_only_output() {
+    let (_root, mut source) = cpu_fixture(false, true);
+    let scrape = scrape_blocking(&mut source, cpu_due()).expect("CPU scrape");
+    assert!(scrape.snapshot.cpu_per_cpu.is_empty());
+    assert_eq!(source.counter_tracker.cpu_ids().count(), 0);
+    let data = decode_metrics(scrape.snapshot.into_otap_records().expect("encode"));
+    let points = cpu_points(&data, metric::CPU_TIME);
+    assert_eq!(points.len(), 7);
+    assert!(points.iter().all(|point| {
+        !point
+            .attributes
+            .iter()
+            .any(|attr| attr.key == attr::CPU_LOGICAL_NUMBER)
+    }));
+}
+
+/// Scenario: the CPU family is disabled despite per-CPU and utilization flags being set.
+/// Guarantees: a requested CPU scrape cannot emit CPU metrics or retain CPU history.
+#[test]
+fn scrape_cpu_disabled_family_ignores_per_cpu_flags() {
+    let (_root, mut source) = cpu_fixture(true, true);
+    source.config.cpu = false;
+    assert!(scrape_blocking(&mut source, cpu_due()).is_err());
+    assert!(source.previous_cpu.is_none());
+    assert_eq!(source.counter_tracker.cpu_ids().count(), 0);
+}
+
+/// Scenario: one CPU's user counter decreases while another CPU's counters advance.
+/// Guarantees: only the reset mode gets a new cumulative start, and utilization recovers independently.
+#[test]
+fn scrape_cpu_resets_are_isolated_by_cpu_and_mode() {
+    let (root, mut source) = cpu_fixture(true, true);
+    let first = scrape_blocking(&mut source, cpu_due()).expect("first CPU scrape");
+    let start = first.snapshot.start_time_unix_nano;
+    fs::write(
+        root.path().join("proc/stat"),
+        "cpu 110 0 60 220\ncpu0 10 0 30 90\ncpu12 70 0 40 130\nbtime 1700000000\n",
+    )
+    .expect("reset stat");
+    let second = scrape_blocking(&mut source, cpu_due()).expect("reset scrape");
+    let reset_time = second.snapshot.now_unix_nano;
+    let reset = &second.snapshot.cpu_per_cpu[0];
+    assert!(reset.utilization.is_none());
+    assert_eq!(
+        reset.starts,
+        [reset_time, start, start, start, start, start, start]
+    );
+    assert!(second.snapshot.cpu_per_cpu[1].utilization.is_some());
+    assert_eq!(second.snapshot.cpu_per_cpu[1].starts, [start; 7]);
+    assert!(second.snapshot.cpu_utilization.is_some());
+    let data = decode_metrics(second.snapshot.into_otap_records().expect("encode"));
+    for point in cpu_points(&data, metric::CPU_TIME) {
+        let is_reset = point.attributes.iter().any(|attr| {
+            attr.key == attr::CPU_LOGICAL_NUMBER
+                && matches!(
+                    attr.value.as_ref().and_then(|value| value.value.as_ref()),
+                    Some(any_value::Value::IntValue(0))
+                )
+        }) && point.attributes.iter().any(|attr| {
+            attr.key == attr::CPU_MODE
+                && matches!(
+                    attr.value.as_ref().and_then(|value| value.value.as_ref()),
+                    Some(any_value::Value::StringValue(value)) if value == "user"
+                )
+        });
+        assert_eq!(
+            point.start_time_unix_nano,
+            if is_reset { reset_time } else { start }
+        );
+    }
+    assert_eq!(cpu_points(&data, metric::CPU_UTILIZATION).len(), 14);
+    fs::write(
+        root.path().join("proc/stat"),
+        "cpu 130 0 80 240\ncpu0 20 0 40 100\ncpu12 80 0 50 140\nbtime 1700000000\n",
+    )
+    .expect("recovered stat");
+    let third = scrape_blocking(&mut source, cpu_due()).expect("recovered scrape");
+    assert!(third.snapshot.cpu_per_cpu[0].utilization.is_some());
+    assert_eq!(third.snapshot.cpu_per_cpu[0].starts[0], reset_time);
+}
+
+/// Scenario: a successful scrape observes a CPU disappear and later return.
+/// Guarantees: missing CPU state is pruned and the returning CPU warms up without stale utilization.
+#[test]
+fn scrape_cpu_hotplug_retires_history() {
+    let (root, mut source) = cpu_fixture(true, true);
+    let _ = scrape_blocking(&mut source, cpu_due()).expect("first CPU scrape");
+    fs::write(
+        root.path().join("proc/stat"),
+        "cpu 110 0 60 220\ncpu0 50 0 30 90\nbtime 1700000000\n",
+    )
+    .expect("offline stat");
+    let offline = scrape_blocking(&mut source, cpu_due()).expect("offline scrape");
+    assert_eq!(offline.snapshot.cpu_per_cpu.len(), 1);
+    assert_eq!(
+        source.counter_tracker.cpu_ids().collect::<Vec<_>>(),
+        vec![0]
+    );
+    fs::write(
+        root.path().join("proc/stat"),
+        "cpu 130 0 80 240\ncpu0 60 0 40 100\ncpu12 90 0 50 140\nbtime 1700000000\n",
+    )
+    .expect("online stat");
+    let online = scrape_blocking(&mut source, cpu_due()).expect("online scrape");
+    assert!(online.snapshot.cpu_per_cpu[0].utilization.is_some());
+    assert!(online.snapshot.cpu_per_cpu[1].utilization.is_none());
+    assert_eq!(source.counter_tracker.cpu_ids().count(), 2);
+}
+
+/// Scenario: CPU data is unchanged or its boot epoch changes between observations.
+/// Guarantees: zero deltas do not emit utilization and a new boot epoch rebases every mode.
+#[test]
+fn scrape_cpu_skips_zero_deltas_and_rebases_after_reboot() {
+    let (root, mut source) = cpu_fixture(true, true);
+    let _ = scrape_blocking(&mut source, cpu_due()).expect("first CPU scrape");
+    let unchanged = scrape_blocking(&mut source, cpu_due()).expect("unchanged scrape");
+    assert!(unchanged.snapshot.cpu_utilization.is_none());
+    assert!(
+        unchanged
+            .snapshot
+            .cpu_per_cpu
+            .iter()
+            .all(|cpu| cpu.utilization.is_none())
+    );
+    fs::write(
+        root.path().join("proc/stat"),
+        "cpu 110 0 60 220\ncpu0 50 0 30 90\ncpu12 70 0 40 130\nbtime 1700000001\n",
+    )
+    .expect("new boot stat");
+    let rebooted = scrape_blocking(&mut source, cpu_due()).expect("new boot scrape");
+    assert!(rebooted.snapshot.cpu_per_cpu.iter().all(|cpu| {
+        cpu.utilization.is_none() && cpu.starts == [1_700_000_001 * NANOS_PER_SEC; 7]
+    }));
+}
+
+/// Scenario: a CPU source read fails, a CPU row is malformed, or CPU collection is not due.
+/// Guarantees: skipped observations do not prune history, and malformed rows surface partial errors.
+#[test]
+fn scrape_cpu_history_survives_failed_and_non_due_observations() {
+    let (root, mut source) = cpu_fixture(true, true);
+    let _ = scrape_blocking(&mut source, cpu_due()).expect("first CPU scrape");
+    let stat_path = root.path().join("proc/stat");
+    fs::remove_file(&stat_path).expect("remove stat");
+    let failed = scrape_blocking(&mut source, cpu_due()).expect("cpuinfo still succeeds");
+    assert_eq!(failed.partial_errors, 1);
+    assert!(failed.snapshot.cpu_per_cpu.is_empty());
+    assert_eq!(source.counter_tracker.cpu_ids().count(), 2);
+    assert!(source.previous_cpu.is_some());
+    fs::write(
+        &stat_path,
+        "cpu 100 0 50 200\ncpu0 invalid\nbtime 1700000000\n",
+    )
+    .expect("malformed stat");
+    let malformed = scrape_blocking(&mut source, cpu_due()).expect("aggregate still succeeds");
+    assert_eq!(malformed.partial_errors, 1);
+    assert!(malformed.snapshot.cpu_per_cpu.is_empty());
+    assert!(malformed.snapshot.cpu.is_some());
+    assert_eq!(source.counter_tracker.cpu_ids().count(), 2);
+    source.config.processes = true;
+    let not_due = scrape_blocking(
+        &mut source,
+        ProcfsFamilies {
+            processes: true,
+            ..ProcfsFamilies::default()
+        },
+    )
+    .expect("process-only scrape");
+    assert_eq!(
+        not_due.partial_errors, 0,
+        "unselected malformed CPU row is not parsed"
+    );
+    assert!(not_due.snapshot.cpu_per_cpu.is_empty());
+    assert_eq!(source.counter_tracker.cpu_ids().count(), 2);
+    fs::write(
+        &stat_path,
+        "cpu 180 0 80 250\ncpu12 80 0 40 150\ncpu0 100 0 40 100\nbtime 1700000000\n",
+    )
+    .expect("recovered stat");
+    let recovered = scrape_blocking(&mut source, cpu_due()).expect("recovered scrape");
+    let data = decode_metrics(recovered.snapshot.into_otap_records().expect("encode"));
+    assert!((cpu_point_value(&data, metric::CPU_UTILIZATION, Some(0), "user") - 0.6).abs() < 1e-10);
+    assert!(
+        (cpu_point_value(&data, metric::CPU_UTILIZATION, Some(12), "user") - 1.0 / 3.0).abs()
+            < 1e-10
+    );
+}
+
+/// Scenario: a failed CPU read is followed by a decreasing per-CPU counter.
+/// Guarantees: reset detection retains its earlier baseline across the read failure.
+#[test]
+fn scrape_cpu_counter_starts_survive_read_errors() {
+    let (root, mut source) = cpu_fixture(true, true);
+    let first = scrape_blocking(&mut source, cpu_due()).expect("first CPU scrape");
+    let start = first.snapshot.start_time_unix_nano;
+    let stat_path = root.path().join("proc/stat");
+    fs::remove_file(&stat_path).expect("remove stat");
+    let _ = scrape_blocking(&mut source, cpu_due()).expect("partial scrape");
+    fs::write(
+        &stat_path,
+        "cpu 110 0 60 220\ncpu0 10 0 30 90\ncpu12 70 0 40 130\nbtime 1700000000\n",
+    )
+    .expect("reset stat");
+    let reset = scrape_blocking(&mut source, cpu_due()).expect("reset scrape");
+    assert_eq!(
+        reset.snapshot.cpu_per_cpu[0].starts[0],
+        reset.snapshot.now_unix_nano
+    );
+    assert_eq!(reset.snapshot.cpu_per_cpu[0].starts[2], start);
+    assert!(reset.snapshot.cpu_per_cpu[0].utilization.is_none());
+    assert!(reset.snapshot.cpu_per_cpu[1].utilization.is_some());
+}
+
+/// Scenario: only logical CPU rows provide metrics or a successful observation has no logical CPUs.
+/// Guarantees: per-CPU-only snapshots are emitted and a successful empty set retires stale state.
+#[test]
+fn scrape_cpu_handles_per_cpu_only_and_empty_observations() {
+    let (root, mut source) = cpu_fixture(true, true);
+    fs::remove_file(root.path().join("proc/cpuinfo")).expect("remove cpuinfo");
+    fs::write(
+        root.path().join("proc/stat"),
+        "cpu12 60 0 30 120\nbtime 1700000000\n",
+    )
+    .expect("per-CPU-only stat");
+    let only = scrape_blocking(&mut source, cpu_due()).expect("per-CPU-only scrape");
+    assert_eq!(only.partial_errors, 1);
+    assert!(only.snapshot.cpu.is_none());
+    assert!(only.snapshot.has_metrics());
+    let data = decode_metrics(only.snapshot.into_otap_records().expect("encode"));
+    assert_eq!(cpu_points(&data, metric::CPU_TIME).len(), 7);
+    fs::write(
+        root.path().join("proc/stat"),
+        "cpu 100 0 50 200\nbtime 1700000000\n",
+    )
+    .expect("empty logical CPU set");
+    let empty = scrape_blocking(&mut source, cpu_due()).expect("aggregate scrape");
+    assert!(empty.snapshot.cpu_per_cpu.is_empty());
+    assert_eq!(source.counter_tracker.cpu_ids().count(), 0);
 }
 
 #[test]
@@ -2413,6 +2918,7 @@ fn projection_fixture_request() -> MetricsData {
                 interrupt: 0.1,
                 steal: 0.1,
             }),
+            cpu_per_cpu: Vec::new(),
             cpuinfo: CpuInfo {
                 logical_count: 2,
                 physical_count: 1,

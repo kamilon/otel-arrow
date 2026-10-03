@@ -131,6 +131,8 @@ pub struct ProcfsConfig {
     pub per_processes: bool,
     /// Derived aggregate CPU utilization.
     pub cpu_utilization: bool,
+    /// Emit per-logical-CPU time and optional utilization.
+    pub cpu_per_cpu: bool,
     /// Emit memory limit metric.
     pub memory_limit: bool,
     /// Emit Linux shared memory metric.
@@ -337,6 +339,7 @@ impl ProcfsSource {
         let due = due.enabled_by(&self.config);
         let now_unix_nano = now_unix_nano();
         let clk_tck = self.clk_tck;
+        let per_cpu = due.cpu && self.config.cpu_per_cpu;
         let mut partial_errors = 0;
         let mut first_error = None;
         let needs_start_time = due.cpu
@@ -351,11 +354,11 @@ impl ProcfsSource {
             || due.processes
             || due.per_processes
             || (needs_start_time && self.boot_time_unix_nano.is_none());
-        let stat = match needs_stat
+        let mut stat = match needs_stat
             .then(|| self.read_path(PathKind::Stat))
             .transpose()
         {
-            Ok(Some(proc_stat)) => parse_stat(proc_stat, clk_tck),
+            Ok(Some(proc_stat)) => parse_stat(proc_stat, clk_tck, per_cpu),
             Ok(None) => StatSnapshot::default(),
             Err(err) => {
                 record_partial_error(&mut partial_errors, &mut first_error, err);
@@ -369,14 +372,28 @@ impl ProcfsSource {
             .boot_time_unix_nano
             .unwrap_or(self.fallback_start_time_unix_nano);
         let cpu_utilization = if due.cpu && self.config.cpu_utilization {
-            let utilization = stat.cpu.and_then(|current| {
-                self.previous_cpu
-                    .and_then(|previous| cpu_utilization(previous, current))
-            });
-            self.previous_cpu = stat.cpu;
-            utilization
+            stat.cpu.and_then(|current| {
+                let utilization = self
+                    .previous_cpu
+                    .and_then(|previous| cpu_utilization(previous, current));
+                self.previous_cpu = Some(current);
+                utilization
+            })
         } else {
             None
+        };
+        let cpu_per_cpu = match stat.cpu_per_cpu.take() {
+            Some(Ok(cpus)) => self.counter_tracker.observe_cpus(
+                cpus,
+                start_time_unix_nano,
+                now_unix_nano,
+                self.config.cpu_utilization,
+            ),
+            Some(Err(err)) => {
+                record_partial_error(&mut partial_errors, &mut first_error, err);
+                Vec::new()
+            }
+            None => Vec::new(),
         };
 
         let host_cpuinfo = match (due.cpu || due.per_processes)
@@ -578,6 +595,7 @@ impl ProcfsSource {
             process_metrics: self.config.process_metrics,
             cpu: due.cpu.then_some(stat.cpu).flatten(),
             cpu_utilization,
+            cpu_per_cpu,
             cpuinfo,
             load,
             memory,

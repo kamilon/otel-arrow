@@ -502,6 +502,47 @@ impl Drop for HostMetricsLease {
 }
 
 #[cfg(target_os = "linux")]
+fn procfs_config(config: &RuntimeConfig) -> ProcfsConfig {
+    ProcfsConfig {
+        cpu: config.families.cpu.enabled,
+        memory: config.families.memory.enabled,
+        paging: config.families.paging.enabled,
+        system: config.families.system.enabled,
+        disk: config.families.disk.enabled,
+        filesystem: config.families.filesystem.enabled,
+        network: config.families.network.enabled,
+        processes: config.families.processes.enabled,
+        load: config.families.load.enabled,
+        per_processes: config.families.processes.per_process,
+        cpu_per_cpu: config.cpu_per_cpu,
+        cpu_utilization: config.cpu_utilization,
+        memory_limit: config.memory_limit,
+        memory_shared: config.memory_shared,
+        memory_hugepages: config.memory_hugepages,
+        disk_limit: config.families.disk.limit,
+        filesystem_include_virtual: config.families.filesystem.include_virtual_filesystems,
+        filesystem_include_remote: config.families.filesystem.include_remote_filesystems,
+        filesystem_limit: config.families.filesystem.limit,
+        disk_include: config.families.disk.include.clone(),
+        disk_exclude: config.families.disk.exclude.clone(),
+        filesystem_include_devices: config.families.filesystem.include_devices.clone(),
+        filesystem_exclude_devices: config.families.filesystem.exclude_devices.clone(),
+        filesystem_include_fs_types: config.families.filesystem.include_fs_types.clone(),
+        filesystem_exclude_fs_types: config.families.filesystem.exclude_fs_types.clone(),
+        filesystem_include_mount_points: config.families.filesystem.include_mount_points.clone(),
+        filesystem_exclude_mount_points: config.families.filesystem.exclude_mount_points.clone(),
+        network_include: config.families.network.include.clone(),
+        network_exclude: config.families.network.exclude.clone(),
+        process_include: config.families.processes.include.clone(),
+        process_exclude: config.families.processes.exclude.clone(),
+        process_max_processes: config.families.processes.max_processes,
+        process_labels: config.families.processes.labels,
+        process_metrics: config.families.processes.metrics,
+        validation: config.validation,
+    }
+}
+
+#[cfg(target_os = "linux")]
 #[async_trait(?Send)]
 impl local::Receiver<OtapPdata> for HostMetricsReceiver {
     async fn start(
@@ -514,59 +555,14 @@ impl local::Receiver<OtapPdata> for HostMetricsReceiver {
             _lease,
             mut metrics,
         } = *self;
-        let scrape_worker = ProcfsScrapeWorker::new(
-            Some(config.root_path.clone()),
-            ProcfsConfig {
-                cpu: config.families.cpu.enabled,
-                memory: config.families.memory.enabled,
-                paging: config.families.paging.enabled,
-                system: config.families.system.enabled,
-                disk: config.families.disk.enabled,
-                filesystem: config.families.filesystem.enabled,
-                network: config.families.network.enabled,
-                processes: config.families.processes.enabled,
-                load: config.families.load.enabled,
-                per_processes: config.families.processes.per_process,
-                cpu_utilization: config.cpu_utilization,
-                memory_limit: config.memory_limit,
-                memory_shared: config.memory_shared,
-                memory_hugepages: config.memory_hugepages,
-                disk_limit: config.families.disk.limit,
-                filesystem_include_virtual: config.families.filesystem.include_virtual_filesystems,
-                filesystem_include_remote: config.families.filesystem.include_remote_filesystems,
-                filesystem_limit: config.families.filesystem.limit,
-                disk_include: config.families.disk.include.clone(),
-                disk_exclude: config.families.disk.exclude.clone(),
-                filesystem_include_devices: config.families.filesystem.include_devices.clone(),
-                filesystem_exclude_devices: config.families.filesystem.exclude_devices.clone(),
-                filesystem_include_fs_types: config.families.filesystem.include_fs_types.clone(),
-                filesystem_exclude_fs_types: config.families.filesystem.exclude_fs_types.clone(),
-                filesystem_include_mount_points: config
-                    .families
-                    .filesystem
-                    .include_mount_points
-                    .clone(),
-                filesystem_exclude_mount_points: config
-                    .families
-                    .filesystem
-                    .exclude_mount_points
-                    .clone(),
-                network_include: config.families.network.include.clone(),
-                network_exclude: config.families.network.exclude.clone(),
-                process_include: config.families.processes.include.clone(),
-                process_exclude: config.families.processes.exclude.clone(),
-                process_max_processes: config.families.processes.max_processes,
-                process_labels: config.families.processes.labels,
-                process_metrics: config.families.processes.metrics,
-                validation: config.validation,
-            },
-        )
-        .map_err(|err| Error::ReceiverError {
-            receiver: effect_handler.receiver_id(),
-            kind: ReceiverErrorKind::Configuration,
-            error: format!("failed to start host metrics scraper worker: {err}"),
-            source_detail: String::new(),
-        })?;
+        let scrape_worker =
+            ProcfsScrapeWorker::new(Some(config.root_path.clone()), procfs_config(&config))
+                .map_err(|err| Error::ReceiverError {
+                    receiver: effect_handler.receiver_id(),
+                    kind: ReceiverErrorKind::Configuration,
+                    error: format!("failed to start host metrics scraper worker: {err}"),
+                    source_detail: String::new(),
+                })?;
         let mut scheduler = FamilyScheduler::new(&config, Instant::now());
         let mut in_flight: Option<InFlightScrape> = None;
 
@@ -868,6 +864,27 @@ mod tests {
         ));
     }
 
+    /// Scenario: CPU options are omitted from both default and deserialized configurations.
+    /// Guarantees: Per-CPU time and utilization remain opt-in through runtime conversion.
+    #[test]
+    fn cpu_opt_ins_default_to_false() {
+        for config in [
+            Config::default(),
+            serde_json::from_value(serde_json::json!({})).expect("valid default config"),
+            serde_json::from_value(serde_json::json!({"families": {"cpu": {}}}))
+                .expect("valid default cpu config"),
+        ] {
+            assert!(!config.families.cpu.per_cpu);
+            assert!(!config.families.cpu.utilization);
+            let runtime = RuntimeConfig::try_from(config).expect("valid runtime config");
+            assert!(!runtime.cpu_per_cpu);
+            assert!(!runtime.cpu_utilization);
+            assert!(runtime.families.cpu.enabled);
+        }
+    }
+
+    /// Scenario: Per-CPU time is explicitly disabled in a CPU configuration.
+    /// Guarantees: Validation accepts the flag and runtime conversion preserves false.
     #[test]
     fn accepts_disabled_cpu_per_cpu_flag() {
         let config: Config = serde_json::from_value(serde_json::json!({
@@ -881,8 +898,12 @@ mod tests {
 
         assert!(!config.families.cpu.per_cpu);
         validate_config(&config).expect("valid config");
+        let runtime = RuntimeConfig::try_from(config).expect("valid runtime config");
+        assert!(!runtime.cpu_per_cpu);
     }
 
+    /// Scenario: CPU utilization is enabled without opting into per-CPU time.
+    /// Guarantees: Utilization is accepted independently and per-CPU time stays disabled.
     #[test]
     fn accepts_cpu_utilization_opt_in() {
         let config: Config = serde_json::from_value(serde_json::json!({
@@ -896,6 +917,9 @@ mod tests {
 
         assert!(config.families.cpu.utilization);
         validate_config(&config).expect("valid config");
+        let runtime = RuntimeConfig::try_from(config).expect("valid runtime config");
+        assert!(runtime.cpu_utilization);
+        assert!(!runtime.cpu_per_cpu);
     }
 
     #[test]
@@ -1054,23 +1078,63 @@ mod tests {
         validate_config(&config).expect("valid config");
     }
 
+    /// Scenario: Per-CPU time is enabled with and without utilization and CPU-family enablement.
+    /// Guarantees: Validation accepts each combination and preserves CPU flags and intervals.
     #[test]
-    fn rejects_v1_cpu_per_cpu() {
-        let config = Config {
-            families: FamiliesConfig {
-                cpu: CpuFamilyConfig {
-                    per_cpu: true,
-                    ..CpuFamilyConfig::default()
-                },
-                ..FamiliesConfig::default()
-            },
-            ..Config::default()
-        };
+    fn accepts_cpu_per_cpu_opt_in() {
+        for enabled in [false, true] {
+            for utilization in [false, true] {
+                let config: Config = serde_json::from_value(serde_json::json!({
+                    "families": {
+                        "cpu": {
+                            "enabled": enabled,
+                            "interval": "30s",
+                            "per_cpu": true,
+                            "utilization": utilization
+                        }
+                    }
+                }))
+                .expect("valid cpu config");
 
-        assert!(matches!(
-            validate_config(&config),
-            Err(otel_arrow_dfe_config::error::Error::InvalidUserConfig { .. })
-        ));
+                validate_config(&config).expect("valid config");
+                let runtime = RuntimeConfig::try_from(config).expect("valid runtime config");
+                assert!(runtime.cpu_per_cpu);
+                assert_eq!(runtime.cpu_utilization, utilization);
+                assert_eq!(runtime.families.cpu.enabled, enabled);
+                assert_eq!(runtime.families.cpu.interval, Duration::from_secs(30));
+            }
+        }
+    }
+
+    /// Scenario: Every CPU-family and opt-in flag combination is passed to receiver startup.
+    /// Guarantees: Procfs receives per-CPU and utilization flags without overriding family enablement.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn wires_cpu_opt_ins_to_procfs() {
+        for enabled in [false, true] {
+            for per_cpu in [false, true] {
+                for utilization in [false, true] {
+                    let runtime = RuntimeConfig::try_from(Config {
+                        families: FamiliesConfig {
+                            cpu: CpuFamilyConfig {
+                                enabled,
+                                per_cpu,
+                                utilization,
+                                ..CpuFamilyConfig::default()
+                            },
+                            ..FamiliesConfig::default()
+                        },
+                        ..Config::default()
+                    })
+                    .expect("valid runtime config");
+                    let source = procfs_config(&runtime);
+
+                    assert_eq!(source.cpu, enabled);
+                    assert_eq!(source.cpu_per_cpu, per_cpu);
+                    assert_eq!(source.cpu_utilization, utilization);
+                }
+            }
+        }
     }
 
     #[test]
@@ -1119,6 +1183,8 @@ mod tests {
         );
     }
 
+    /// Scenario: Per-CPU time and utilization use a CPU interval shorter than other families.
+    /// Guarantees: CPU opt-ins preserve the initial delay and CPU-family scrape schedule.
     #[cfg(target_os = "linux")]
     #[test]
     fn scheduler_honors_initial_delay_and_family_intervals() {
@@ -1128,6 +1194,8 @@ mod tests {
             families: FamiliesConfig {
                 cpu: CpuFamilyConfig {
                     interval: Some(Duration::from_secs(5)),
+                    per_cpu: true,
+                    utilization: true,
                     ..CpuFamilyConfig::default()
                 },
                 ..FamiliesConfig::default()

@@ -133,9 +133,9 @@ pub struct CpuFamilyConfig {
     /// Family collection interval. Defaults to top-level `collection_interval`.
     #[serde(default, with = "humantime_serde::option")]
     pub interval: Option<Duration>,
-    /// Emit per-logical-CPU time series. Not supported in v1.
+    /// Emit per-logical-CPU time series alongside aggregate CPU time.
     pub per_cpu: bool,
-    /// Emit aggregate CPU utilization derived from CPU time deltas.
+    /// Emit CPU utilization derived from time deltas, including per-CPU when enabled.
     pub utilization: bool,
 }
 
@@ -540,6 +540,7 @@ pub(super) struct RuntimeConfig {
     pub(super) root_path: PathBuf,
     pub(super) validation: HostViewValidationMode,
     pub(super) initial_delay: Duration,
+    pub(super) cpu_per_cpu: bool,
     pub(super) cpu_utilization: bool,
     pub(super) memory_limit: bool,
     pub(super) memory_shared: bool,
@@ -698,11 +699,6 @@ pub(super) fn validate_config(config: &Config) -> Result<(), otel_arrow_dfe_conf
     if config.families.network.include_connection_count {
         return Err(otel_arrow_dfe_config::error::Error::InvalidUserConfig {
             error: "network include_connection_count is not supported in v1".to_owned(),
-        });
-    }
-    if config.families.cpu.per_cpu {
-        return Err(otel_arrow_dfe_config::error::Error::InvalidUserConfig {
-            error: "cpu per_cpu is not supported in v1".to_owned(),
         });
     }
     if config.families.processes.mode == ProcessMode::SummaryAndPerProcess
@@ -919,6 +915,7 @@ impl TryFrom<Config> for RuntimeConfig {
             root_path,
             validation: config.host_view.validation,
             initial_delay: config.initial_delay,
+            cpu_per_cpu: config.families.cpu.per_cpu,
             cpu_utilization: config.families.cpu.utilization,
             memory_limit: config.families.memory.limit,
             memory_shared: config.families.memory.shared,
