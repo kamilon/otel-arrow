@@ -1,0 +1,52 @@
+{
+  "id": "scalar-basic",
+  "format": "prometheus-text-0.0.4",
+  "scrape_time_unix_nano": 1700000000000000000,
+  "input": "# HELP requests_total Requests served\n# TYPE requests_total counter\n  requests_total{method=\"GET\",job=\"edge\",instance=\"api-a\"} 7 1700000000123\n# HELP temperature_celsius Ambient temperature\n# TYPE temperature_celsius gauge\ntemperature_celsius{zone=\"west\",job=\"edge\",instance=\"api-a\"} 21.5\n",
+  "expected": {
+    "resource": {
+      "service.name": "edge",
+      "service.instance.id": "api-a",
+      "server.address": "127.0.0.1",
+      "server.port": 9090,
+      "url.scheme": "http"
+    },
+    "scope": {
+      "name": "otel-arrow.prometheus_scrape",
+      "version": "0.1.0"
+    },
+    "metrics": [
+      {
+        "name": "requests_total",
+        "description": "Requests served",
+        "prometheus.type": "counter",
+        "data_type": "sum",
+        "is_monotonic": true,
+        "points": [
+          {
+            "value": 7.0,
+            "time_unix_nano": 1700000000123000000,
+            "attributes": {
+              "method": "GET"
+            }
+          }
+        ]
+      },
+      {
+        "name": "temperature_celsius",
+        "description": "Ambient temperature",
+        "prometheus.type": "gauge",
+        "data_type": "gauge",
+        "points": [
+          {
+            "value": 21.5,
+            "time_unix_nano": 1700000000000000000,
+            "attributes": {
+              "zone": "west"
+            }
+          }
+        ]
+      }
+    ]
+  }
+}
