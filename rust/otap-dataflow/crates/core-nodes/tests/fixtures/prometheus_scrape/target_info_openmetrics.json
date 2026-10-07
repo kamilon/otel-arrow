@@ -1,0 +1,22 @@
+{
+  "id": "target-info-openmetrics",
+  "format": "openmetrics-text-1.0.0",
+  "scrape_time_unix_nano": 1700000000000000000,
+  "input": "# TYPE target info\ntarget_info{cluster=\"west\",version=\"2\"} 1\n# EOF\n",
+  "expected": {
+    "resource": {
+      "service.name": "edge",
+      "service.instance.id": "api-a",
+      "server.address": "127.0.0.1",
+      "server.port": 9090,
+      "url.scheme": "http",
+      "cluster": "west",
+      "version": "2"
+    },
+    "scope": {
+      "name": "otel-arrow.prometheus_scrape",
+      "version": "0.1.0"
+    },
+    "metrics": []
+  }
+}

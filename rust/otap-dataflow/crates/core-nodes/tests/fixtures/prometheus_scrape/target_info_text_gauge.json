@@ -1,0 +1,21 @@
+{
+  "id": "target-info-text-gauge",
+  "format": "prometheus-text-0.0.4",
+  "scrape_time_unix_nano": 1700000000000000000,
+  "input": "# TYPE target_info gauge\ntarget_info{cluster=\"west\"} 1\n",
+  "expected": {
+    "resource": {
+      "service.name": "edge",
+      "service.instance.id": "api-a",
+      "server.address": "127.0.0.1",
+      "server.port": 9090,
+      "url.scheme": "http",
+      "cluster": "west"
+    },
+    "scope": {
+      "name": "otel-arrow.prometheus_scrape",
+      "version": "0.1.0"
+    },
+    "metrics": []
+  }
+}
