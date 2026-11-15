@@ -35,7 +35,8 @@ jobs:
         with:
           context: rust/otap-dataflow
           file: rust/otap-dataflow/Dockerfile
-          build-context: otel-arrow=.
+          build-contexts: |
+            otel-arrow=.
           push: true
           tags: |
             forge.kritonia.com/observability/df-engine:sha-${{ github.sha }}
