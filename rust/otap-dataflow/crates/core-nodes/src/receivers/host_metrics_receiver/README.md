@@ -12,7 +12,9 @@
 
 Linux host metrics receiver backed by procfs and sysfs. It emits OpenTelemetry
 `system.*` metrics for CPU, memory, paging, system uptime, disk, filesystem,
-network, and aggregate process counts.
+network, temperatures, and aggregate process counts. Temperature collection
+reads Linux hwmon sensors and thermal zones when those interfaces are exposed
+to the process; virtual machines may legitimately report no temperature data.
 
 ## Getting Started
 
@@ -53,6 +55,9 @@ config:
       limit: false
       shared: false
       hugepages: false
+    temperature:
+      enabled: false
+      interval: 10s
     disk:
       limit: false
     filesystem:
@@ -92,8 +97,11 @@ config:
       limit: true
 ```
 
-Families are `cpu`, `memory`, `paging`, `system`, `disk`, `filesystem`,
-`network`, `processes`, and `load`.
+Families are `cpu`, `memory`, `paging`, `system`, `temperature`, `disk`,
+`filesystem`, `network`, `processes`, and `load`. Temperature datapoints use
+the `system.temperature` metric with unit `Cel` and include `temperature.source`,
+`temperature.chip`, `temperature.sensor`, and an optional `temperature.label`
+attribute.
 
 Host-wide collection must run in a one-core source pipeline. Configure that at
 the surrounding pipeline `policies.resources.core_allocation` level. Use a

@@ -117,6 +117,8 @@ pub struct ProcfsConfig {
     pub paging: bool,
     /// System metrics.
     pub system: bool,
+    /// Temperature metrics.
+    pub temperature: bool,
     /// Disk metrics.
     pub disk: bool,
     /// Filesystem metrics.
@@ -278,6 +280,8 @@ pub struct ProcfsFamilies {
     pub paging: bool,
     /// System metrics.
     pub system: bool,
+    /// Temperature metrics.
+    pub temperature: bool,
     /// Disk metrics.
     pub disk: bool,
     /// Filesystem metrics.
@@ -299,6 +303,7 @@ impl ProcfsFamilies {
             memory: self.memory && config.memory,
             paging: self.paging && config.paging,
             system: self.system && config.system,
+            temperature: self.temperature && config.temperature,
             disk: self.disk && config.disk,
             filesystem: self.filesystem && config.filesystem,
             network: self.network && config.network,
@@ -457,6 +462,18 @@ impl ProcfsSource {
             }
         };
 
+        let temperatures = if due.temperature {
+            match self.read_temperatures() {
+                Ok(temperatures) => temperatures,
+                Err(err) => {
+                    record_partial_error(&mut partial_errors, &mut first_error, err);
+                    Vec::new()
+                }
+            }
+        } else {
+            Vec::new()
+        };
+
         let paging = match due
             .paging
             .then(|| self.read_path(PathKind::Vmstat))
@@ -600,6 +617,7 @@ impl ProcfsSource {
             load,
             memory,
             uptime_seconds,
+            temperatures,
             paging,
             swaps,
             processes: due.processes.then_some(stat.processes),
@@ -926,6 +944,92 @@ impl ProcfsSource {
         let _ = file.read_to_string(&mut self.buf)?;
         let sectors = parse_u64(self.buf.trim());
         Ok(sectors.saturating_mul(DISKSTAT_SECTOR_BYTES))
+    }
+
+    fn read_temperatures(&self) -> io::Result<Vec<TemperatureReading>> {
+        let mut readings = Vec::new();
+
+        let hwmon_entries = match fs::read_dir(&self.paths.sys_class_hwmon) {
+            Ok(entries) => Some(entries),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => None,
+            Err(err) => return Err(err),
+        };
+        if let Some(hwmon_entries) = hwmon_entries {
+            for hwmon_entry in hwmon_entries.flatten() {
+                let hwmon_path = hwmon_entry.path();
+                if !hwmon_path.is_dir() {
+                    continue;
+                }
+                let chip = fs::read_to_string(hwmon_path.join("name"))
+                    .ok()
+                    .map(|name| name.trim().to_owned())
+                    .filter(|name| !name.is_empty())
+                    .unwrap_or_else(|| hwmon_entry.file_name().to_string_lossy().into_owned());
+                let Ok(sensor_entries) = fs::read_dir(&hwmon_path) else {
+                    continue;
+                };
+                for sensor_entry in sensor_entries.flatten() {
+                    let file_name = sensor_entry.file_name().to_string_lossy().into_owned();
+                    let Some(sensor) = file_name
+                        .strip_prefix("temp")
+                        .and_then(|name| name.strip_suffix("_input"))
+                    else {
+                        continue;
+                    };
+                    let Ok(raw) = fs::read_to_string(sensor_entry.path()) else {
+                        continue;
+                    };
+                    let Ok(millidegrees) = raw.trim().parse::<f64>() else {
+                        continue;
+                    };
+                    let label_path = hwmon_path.join(format!("temp{sensor}_label"));
+                    let label = fs::read_to_string(label_path)
+                        .ok()
+                        .map(|label| label.trim().to_owned())
+                        .filter(|label| !label.is_empty());
+                    readings.push(TemperatureReading {
+                        source: "hwmon",
+                        chip: chip.clone(),
+                        sensor: format!("temp{sensor}"),
+                        label,
+                        celsius: millidegrees / 1000.0,
+                    });
+                }
+            }
+        }
+
+        let thermal_entries = match fs::read_dir(&self.paths.sys_class_thermal) {
+            Ok(entries) => entries,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(readings),
+            Err(err) => return Err(err),
+        };
+        for thermal_entry in thermal_entries.flatten() {
+            let thermal_path = thermal_entry.path();
+            let name = thermal_entry.file_name().to_string_lossy().into_owned();
+            if !name.starts_with("thermal_zone") || !thermal_path.is_dir() {
+                continue;
+            }
+            let Ok(raw) = fs::read_to_string(thermal_path.join("temp")) else {
+                continue;
+            };
+            let Ok(millidegrees) = raw.trim().parse::<f64>() else {
+                continue;
+            };
+            let chip = fs::read_to_string(thermal_path.join("type"))
+                .ok()
+                .map(|value| value.trim().to_owned())
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| name.clone());
+            readings.push(TemperatureReading {
+                source: "thermal_zone",
+                chip,
+                sensor: name,
+                label: None,
+                celsius: millidegrees / 1000.0,
+            });
+        }
+
+        Ok(readings)
     }
 
     fn read_filesystems(

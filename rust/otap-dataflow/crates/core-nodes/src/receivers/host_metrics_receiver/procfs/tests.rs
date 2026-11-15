@@ -44,6 +44,7 @@ fn memory_only_procfs_config() -> ProcfsConfig {
         memory: true,
         paging: false,
         system: false,
+        temperature: false,
         disk: false,
         filesystem: false,
         network: false,
@@ -84,6 +85,36 @@ fn load_only_procfs_config() -> ProcfsConfig {
         memory: false,
         ..memory_only_procfs_config()
     }
+}
+
+#[test]
+fn reads_hwmon_and_thermal_zone_temperatures() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let hwmon = root.path().join("sys/class/hwmon/hwmon0");
+    fs::create_dir_all(&hwmon).expect("hwmon dir");
+    fs::write(hwmon.join("name"), "coretemp\n").expect("hwmon name");
+    fs::write(hwmon.join("temp1_input"), "51500\n").expect("hwmon value");
+    fs::write(hwmon.join("temp1_label"), "Package id 0\n").expect("hwmon label");
+
+    let thermal = root.path().join("sys/class/thermal/thermal_zone0");
+    fs::create_dir_all(&thermal).expect("thermal dir");
+    fs::write(thermal.join("type"), "x86_pkg_temp\n").expect("thermal type");
+    fs::write(thermal.join("temp"), "49875\n").expect("thermal value");
+
+    let mut config = memory_only_procfs_config();
+    config.memory = false;
+    config.temperature = true;
+    let source = ProcfsSource::new(Some(root.path()), config).expect("source");
+    let readings = source.read_temperatures().expect("temperature readings");
+
+    assert_eq!(readings.len(), 2);
+    assert_eq!(readings[0].source, "hwmon");
+    assert_eq!(readings[0].chip, "coretemp");
+    assert_eq!(readings[0].label.as_deref(), Some("Package id 0"));
+    assert!((readings[0].celsius - 51.5).abs() < f64::EPSILON);
+    assert_eq!(readings[1].source, "thermal_zone");
+    assert_eq!(readings[1].chip, "x86_pkg_temp");
+    assert!((readings[1].celsius - 49.875).abs() < f64::EPSILON);
 }
 
 fn write_fake_process(
@@ -641,6 +672,7 @@ fn scrape_due_emits_successful_families_after_partial_read_error() {
             memory: true,
             paging: false,
             system: false,
+            temperature: false,
             disk: true,
             filesystem: false,
             network: false,
@@ -713,6 +745,7 @@ fn scrape_due_collects_opt_in_per_process_metrics_with_filters_and_limit() {
             memory: false,
             paging: false,
             system: false,
+            temperature: false,
             disk: false,
             filesystem: false,
             network: false,
@@ -836,6 +869,7 @@ fn scrape_due_ignores_expected_per_process_races_and_permission_shapes() {
             memory: false,
             paging: false,
             system: false,
+            temperature: false,
             disk: false,
             filesystem: false,
             network: false,
@@ -903,6 +937,7 @@ fn scrape_due_skips_process_io_when_disk_io_metric_is_disabled() {
             memory: false,
             paging: false,
             system: false,
+            temperature: false,
             disk: false,
             filesystem: false,
             network: false,
@@ -979,6 +1014,7 @@ fn scrape_due_preserves_disk_counter_state_after_diskstats_read_error() {
             memory: true,
             paging: false,
             system: false,
+            temperature: false,
             disk: true,
             filesystem: false,
             network: false,
@@ -1081,6 +1117,7 @@ fn scrape_due_uses_stable_fallback_start_time_when_stat_is_unavailable() {
             memory: false,
             paging: false,
             system: false,
+            temperature: false,
             disk: true,
             filesystem: false,
             network: false,
@@ -1160,6 +1197,7 @@ fn validation_requires_stat_for_cumulative_families() {
             memory: false,
             paging: false,
             system: false,
+            temperature: false,
             disk: true,
             filesystem: false,
             network: false,
@@ -1218,6 +1256,7 @@ fn scrape_worker_preserves_startup_validation_errors() {
             memory: false,
             paging: false,
             system: false,
+            temperature: false,
             disk: true,
             filesystem: false,
             network: false,
@@ -1380,6 +1419,7 @@ fn scrape_due_fails_when_all_due_families_fail() {
             memory: true,
             paging: false,
             system: false,
+            temperature: false,
             disk: false,
             filesystem: false,
             network: false,
@@ -1447,6 +1487,7 @@ fn scrape_due_reads_opt_in_disk_limit_from_sysfs() {
             memory: false,
             paging: false,
             system: false,
+            temperature: false,
             disk: true,
             filesystem: false,
             network: false,
@@ -1531,6 +1572,7 @@ fn scrape_due_uses_boot_time_for_counter_only_family_ticks() {
             memory: false,
             paging: true,
             system: false,
+            temperature: false,
             disk: true,
             filesystem: false,
             network: true,
@@ -1620,6 +1662,7 @@ fn scrape_due_reads_filesystem_usage_from_mountinfo() {
             memory: false,
             paging: false,
             system: false,
+            temperature: false,
             disk: false,
             filesystem: true,
             network: false,

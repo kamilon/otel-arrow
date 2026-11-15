@@ -74,6 +74,7 @@ pub(crate) mod metric {
     pub(crate) const PROCESS_THREADS: &str = "process.thread.count";
     pub(crate) const PROCESS_UPTIME: &str = "process.uptime";
     pub(crate) const UPTIME: &str = "system.uptime";
+    pub(crate) const TEMPERATURE: &str = "system.temperature";
 }
 
 pub(crate) mod attr {
@@ -100,6 +101,10 @@ pub(crate) mod attr {
         "system.memory.linux.hugepages.state";
     pub(crate) const SYSTEM_MEMORY_LINUX_SLAB_STATE: &str = "system.memory.linux.slab.state";
     pub(crate) const SYSTEM_MEMORY_STATE: &str = "system.memory.state";
+    pub(crate) const TEMPERATURE_SOURCE: &str = "temperature.source";
+    pub(crate) const TEMPERATURE_CHIP: &str = "temperature.chip";
+    pub(crate) const TEMPERATURE_SENSOR: &str = "temperature.sensor";
+    pub(crate) const TEMPERATURE_LABEL: &str = "temperature.label";
     pub(crate) const SYSTEM_PAGING_DIRECTION: &str = "system.paging.direction";
     pub(crate) const SYSTEM_PAGING_FAULT_TYPE: &str = "system.paging.fault.type";
     pub(crate) const SYSTEM_PAGING_STATE: &str = "system.paging.state";

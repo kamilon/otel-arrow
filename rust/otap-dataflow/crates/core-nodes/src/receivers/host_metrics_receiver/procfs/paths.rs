@@ -16,6 +16,8 @@ pub(super) struct ProcfsPaths {
     diskstats: PathBuf,
     pub(super) mountinfo: PathBuf,
     pub(super) sys_block: PathBuf,
+    pub(super) sys_class_hwmon: PathBuf,
+    pub(super) sys_class_thermal: PathBuf,
     pub(super) net_dev: PathBuf,
     machine_id: PathBuf,
     dbus_machine_id: PathBuf,
@@ -42,6 +44,8 @@ impl ProcfsPaths {
                 root.join("proc/self/mountinfo")
             },
             sys_block: root.join("sys/block"),
+            sys_class_hwmon: root.join("sys/class/hwmon"),
+            sys_class_thermal: root.join("sys/class/thermal"),
             machine_id: root.join("etc/machine-id"),
             dbus_machine_id: root.join("var/lib/dbus/machine-id"),
             hostname: root.join("proc/sys/kernel/hostname"),

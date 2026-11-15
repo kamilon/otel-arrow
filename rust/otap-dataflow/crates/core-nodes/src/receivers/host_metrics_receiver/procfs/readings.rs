@@ -56,6 +56,16 @@ pub(super) struct LoadAverage {
     pub(super) fifteen_minutes: f64,
 }
 
+/// One temperature sensor reading from Linux hwmon or thermal zones.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct TemperatureReading {
+    pub(super) source: &'static str,
+    pub(super) chip: String,
+    pub(super) sensor: String,
+    pub(super) label: Option<String>,
+    pub(super) celsius: f64,
+}
+
 #[derive(Default)]
 pub(super) struct StatSnapshot {
     pub(super) boot_time_unix_nano: u64,

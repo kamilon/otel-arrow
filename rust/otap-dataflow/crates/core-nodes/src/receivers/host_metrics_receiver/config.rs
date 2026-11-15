@@ -98,6 +98,8 @@ pub struct FamiliesConfig {
     pub paging: FamilyConfig,
     /// System metrics.
     pub system: FamilyConfig,
+    /// Hardware and thermal-zone temperature metrics.
+    pub temperature: FamilyConfig,
     /// Disk metrics.
     pub disk: DiskFamilyConfig,
     /// Filesystem metrics.
@@ -116,6 +118,7 @@ impl FamiliesConfig {
             + usize::from(self.memory.enabled)
             + usize::from(self.paging.enabled)
             + usize::from(self.system.enabled)
+            + usize::from(self.temperature.enabled)
             + usize::from(self.disk.enabled)
             + usize::from(self.filesystem.enabled)
             + usize::from(self.network.enabled)
@@ -554,6 +557,7 @@ pub(super) struct RuntimeFamilies {
     pub(super) memory: RuntimeFamily,
     pub(super) paging: RuntimeFamily,
     pub(super) system: RuntimeFamily,
+    pub(super) temperature: RuntimeFamily,
     pub(super) disk: RuntimeDiskFamily,
     pub(super) filesystem: RuntimeFilesystemFamily,
     pub(super) network: RuntimeNetworkFamily,
@@ -758,6 +762,11 @@ pub(super) fn validate_config(config: &Config) -> Result<(), otel_arrow_dfe_conf
         config.families.system.interval,
     )?;
     validate_family_interval(
+        "temperature",
+        config.families.temperature.enabled,
+        config.families.temperature.interval,
+    )?;
+    validate_family_interval(
         "disk",
         config.families.disk.enabled,
         config.families.disk.interval,
@@ -928,6 +937,10 @@ impl TryFrom<Config> for RuntimeConfig {
                 ),
                 paging: RuntimeFamily::new(&config.families.paging, config.collection_interval),
                 system: RuntimeFamily::new(&config.families.system, config.collection_interval),
+                temperature: RuntimeFamily::new(
+                    &config.families.temperature,
+                    config.collection_interval,
+                ),
                 disk: RuntimeDiskFamily {
                     enabled: config.families.disk.enabled,
                     interval: config

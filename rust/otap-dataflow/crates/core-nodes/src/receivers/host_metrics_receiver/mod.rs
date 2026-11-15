@@ -266,6 +266,7 @@ fn due_family_count(due: ProcfsFamilies) -> u64 {
         + u64::from(due.memory)
         + u64::from(due.paging)
         + u64::from(due.system)
+        + u64::from(due.temperature)
         + u64::from(due.disk)
         + u64::from(due.filesystem)
         + u64::from(due.network)
@@ -290,6 +291,7 @@ enum ScheduledFamilyKind {
     Memory,
     Paging,
     System,
+    Temperature,
     Disk,
     Filesystem,
     Network,
@@ -336,6 +338,12 @@ impl FamilyScheduler {
             &mut entries,
             ScheduledFamilyKind::System,
             &config.families.system,
+            first_due,
+        );
+        push_scheduled(
+            &mut entries,
+            ScheduledFamilyKind::Temperature,
+            &config.families.temperature,
             first_due,
         );
         if config.families.disk.enabled {
@@ -394,6 +402,7 @@ impl FamilyScheduler {
                     ScheduledFamilyKind::Memory => due.memory = true,
                     ScheduledFamilyKind::Paging => due.paging = true,
                     ScheduledFamilyKind::System => due.system = true,
+                    ScheduledFamilyKind::Temperature => due.temperature = true,
                     ScheduledFamilyKind::Disk => due.disk = true,
                     ScheduledFamilyKind::Filesystem => due.filesystem = true,
                     ScheduledFamilyKind::Network => due.network = true,
@@ -416,6 +425,7 @@ impl FamilyScheduler {
                 ScheduledFamilyKind::Memory => due.memory,
                 ScheduledFamilyKind::Paging => due.paging,
                 ScheduledFamilyKind::System => due.system,
+                ScheduledFamilyKind::Temperature => due.temperature,
                 ScheduledFamilyKind::Disk => due.disk,
                 ScheduledFamilyKind::Filesystem => due.filesystem,
                 ScheduledFamilyKind::Network => due.network,
@@ -508,6 +518,7 @@ fn procfs_config(config: &RuntimeConfig) -> ProcfsConfig {
         memory: config.families.memory.enabled,
         paging: config.families.paging.enabled,
         system: config.families.system.enabled,
+        temperature: config.families.temperature.enabled,
         disk: config.families.disk.enabled,
         filesystem: config.families.filesystem.enabled,
         network: config.families.network.enabled,
@@ -793,6 +804,10 @@ mod tests {
                     ..FamilyConfig::default()
                 },
                 system: FamilyConfig {
+                    enabled: false,
+                    ..FamilyConfig::default()
+                },
+                temperature: FamilyConfig {
                     enabled: false,
                     ..FamilyConfig::default()
                 },

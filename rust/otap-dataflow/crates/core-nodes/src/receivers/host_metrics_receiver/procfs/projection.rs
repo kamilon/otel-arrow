@@ -10,7 +10,7 @@ use super::COUNTER_KEY_SEPARATOR;
 use super::readings::{
     CpuInfo, CpuTimes, DiskStats, FilesystemStats, HugepageStats, LoadAverage, LogicalCpuTimes,
     MemoryStats, NetworkStats, PagingStats, ProcessMetrics, ProcessStats, SwapStats,
-    cpu_utilization, frequency_hz_i64, saturating_i64,
+    TemperatureReading, cpu_utilization, frequency_hz_i64, saturating_i64,
 };
 
 /// Result of one host metrics scrape.
@@ -38,6 +38,7 @@ pub(crate) struct HostSnapshot {
     pub(super) load: Option<LoadAverage>,
     pub(super) memory: Option<MemoryStats>,
     pub(super) uptime_seconds: Option<f64>,
+    pub(super) temperatures: Vec<TemperatureReading>,
     pub(super) paging: Option<PagingStats>,
     pub(super) swaps: Vec<SwapStats>,
     pub(super) processes: Option<ProcessStats>,
@@ -59,6 +60,7 @@ impl HostSnapshot {
             || self.load.is_some()
             || self.memory.is_some()
             || self.uptime_seconds.is_some()
+            || !self.temperatures.is_empty()
             || self.paging.is_some()
             || !self.swaps.is_empty()
             || self.processes.is_some()
@@ -168,6 +170,21 @@ pub(super) fn project_snapshot(snap: &HostSnapshot, b: &mut HostMetricsArrowBuil
         b.append_f64_gauge_dp(m, now, load.five_minutes, |_| {});
         let m = b.begin_gauge_f64(metric::CPU_LOAD_AVERAGE_15M, "{thread}");
         b.append_f64_gauge_dp(m, now, load.fifteen_minutes, |_| {});
+    }
+
+    // -- Temperature ---------------------------------------------------------
+    if !snap.temperatures.is_empty() {
+        let m = b.begin_gauge_f64(metric::TEMPERATURE, "Cel");
+        for temperature in &snap.temperatures {
+            b.append_f64_gauge_dp(m, now, temperature.celsius, |w| {
+                w.str(attr::TEMPERATURE_SOURCE, temperature.source);
+                w.str(attr::TEMPERATURE_CHIP, &temperature.chip);
+                w.str(attr::TEMPERATURE_SENSOR, &temperature.sensor);
+                if let Some(label) = &temperature.label {
+                    w.str(attr::TEMPERATURE_LABEL, label);
+                }
+            });
+        }
     }
 
     // -- Memory ---------------------------------------------------------------
